@@ -91,6 +91,28 @@ class Tensor(object):
         if(self.autogrd):
             return Tensor(((self.data >= 0) * self.data ) , autogrd=True , crs=[self] , cr_op="relu")
         return Tensor(((self.data >= 0) * self.data ) )
+    
+    def index_select(self , indices):
+        if(self.autogrd):
+            nw = Tensor(self.data[indices.data] , autogrd=True , crs=[self] , cr_op="index_select")
+            nw.index_select_indices = indices
+            return nw
+        return Tensor(self.data[indices.data])
+    
+    def cross_entropy(self, target_indices ):
+        tmp = np.exp(self.data)
+        sftmx_out = tmp / np.sum(tmp , axis=len(self.data.shape)-1 , keepdims=True)
+        t = target_indices.data.flatten()
+        p = sftmx_out.reshape(len(t), -1)
+        trg_dis = np.eye(p.shape[1])[t]
+        loss = -(np.log(p) * (trg_dis)).sum(1).mean()
+
+        if (self.autogrd):
+            out = Tensor(loss , autogrd=True , crs=[self] , cr_op="cross_entropy")
+            out.softmax_output = sftmx_out
+            out.target_dist = trg_dis
+            return out
+        return Tensor(loss)
     #################################
     def __repr__(self):
         return str(self.data.__repr__())
@@ -156,8 +178,16 @@ class Tensor(object):
                 ###WARNING :
                 if(self.cr_op =="relu"):
                     self.crs[0].back((self.data > 0) * self.grd.data)
-
-                    
+                if(self.cr_op == "index_select" ):
+                    nw_grd = np.zeros_like(self.crs[0].data)
+                    indices_ = self.index_select_indices.data.flatteen()
+                    grd_ = grd.data.reshape(len(indices_) , -1 )
+                    for i in range(len(indices_)):
+                        nw_grd[indices_[i]]+=grd[i]
+                    self.crs[0].back(Tensor(nw_grd))
+                if(self.cr_op =="cross_entropy"):
+                    dx = self.softmax_output - self.target_dist
+                    self.crs[0].back(Tensor(dx))
 
                 
 class SGD(object):
@@ -231,3 +261,57 @@ class Sigmoid(Layer):
         super().__init__()
     def forward(self , input):
         return input.sigmoid()
+
+class Embedding(Layer):
+    def __init__(self , vocab_size , dim):
+        super().__init__()
+
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.w = Tensor(((np.random.rand(vocab_size, dim) - 0.5) / dim) , autogrd=True)
+        self.parameters.append(self.w)
+
+    def forward(self, input):
+        return self.w.index_select(input)
+    
+    
+class CrossEntropyLoss(object):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self , input , target):
+        return input.cross_entropy(target)
+
+class RNNCell(Layer):
+    def __init__(self , n_inp , n_hidden , n_out , activation='sigmoid'):
+        super().__init__()
+        self.n_inp = n_inp
+        self.n_hid =  n_hidden
+        self.n_out = n_out
+
+        if activation =='sigmoid':
+            self.activation = 'sigmoid'
+        elif activation == 'tahn':
+            self.activation = 'tahn'
+        else:
+            raise Exception("elif activation == 'tahn':  self.activation = 'tahn' else:")
+        self.w_ih = Linear(n_inp , n_hidden)
+        self.w_hh = Linear(n_hidden , n_hidden)
+        self.w_ho = Linear(n_hidden , n_out)
+
+        self.parameters +=self.w_ih.get_par()
+        self.parameters +=self.w_hh.get_par()
+        self.parameters +=self.w_ho.get_par()
+
+    def forward(self , input , hidden ):
+        fph = self.w_hh.forward(hidden)
+        com = self.w_ih.forward(input) + fph
+        nw_hid = self.activation.forward(com)
+        out = self.w_ho.forward(nw_hid)
+        return out , nw_hid
+    def init_hidden(self , batch_size = 1):
+        return  Tensor(np.zeros((batch_size ,self.n_hid)) , autogrd=True)
+    
+
+
+
